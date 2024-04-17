@@ -1,0 +1,991 @@
+---
+title: "biolabs_project"
+output:
+  html_document:
+    df_print: paged
+date: "2022-06-23"
+---
+
+Creating MES.5
+
+```{r tyding data -> MES.5}
+library(tidyverse)
+library(tidyr)
+
+#Remove _Methyl_100ng_ from column names
+MES -> MES.5
+colnames(MES.5) <- gsub("_Methyl_100ng_", "_", colnames(MES.5))
+
+#rename and separate #KEY into gene_id and type 
+MES.5 %>% 
+  separate(`#KEY`, c("gene_id", "type"), 
+           sep = "\\|",
+           remove = T, 
+           convert = T) -> MES.5
+
+#change _ in gene_id to -
+MES.5$gene_id <- gsub('_', '-', MES.5$gene_id)
+
+#separate gene_id into gene_id and suffix
+##some gene_id have two - or no -
+MES.5 %>%
+  rename(isoform = gene_id)|>
+  separate(isoform, c("gene_id", "suffix"),
+           sep = "-(?!.*-)",
+           remove = F, 
+           convert = T,
+           fill = "right") -> MES.5
+
+#Remove all rows with pseudocounts of 0 over all days, experiments and replicates 
+MES.5[rowSums(MES.5[, 5:48])>0,] -> MES.5
+
+#Remove numerical NAs
+which(is.na(MES.5), arr.ind=TRUE)
+MES.5[-59652,] -> MES.5
+
+```
+
+```{r MES.5.csv}
+
+MES.5 %>% 
+  write_csv("/Users/danielle.dyer/Documents/DS Practicum/BioLabs Project/CSV/MES.5.csv")
+
+```
+
+Creating MES1
+
+```{r MES.5 -> MES1}
+
+#Pivot longer to assign case_id to each transcript and create row of pseudocounts
+MES.5 %>% 
+  pivot_longer(cols = c(5:48), names_to = "case_id", values_to = "pseudocounts") -> MES1
+
+#Remove KK_MES_ from the front and -2 from the end of the string 
+#Separated case_id into 3 columns (experiment, day and rep)
+MES1 %>% 
+  mutate(case_id = str_sub(case_id, start = 8, end = -3)) %>% 
+  separate(case_id, c("exp", "day", "rep"), 
+           sep = "_", 
+           remove = T, 
+           convert = T,
+           fill = "left") -> MES1
+
+#Replace NAs with Exp1, remove the exp and remove the D infront of day number
+MES1 <-
+  replace_na(MES1, list(exp = "Exp1"))
+MES1 <- 
+  mutate(MES1, exp = str_sub(exp, start = 4)) 
+MES1 <- 
+  mutate(MES1, day = str_sub(day, start = 2))
+
+#Change exp and day from characters to numeric 
+MES1 <- 
+  mutate(MES1, across(.cols = 5:6, .fns = as.numeric))
+
+```
+
+```{r MES1.csv}
+
+MES1 %>% 
+  write_csv("/Users/danielle.dyer/Documents/DS Practicum/BioLabs Project/CSV/MES1.csv")
+
+```
+
+Creating MES2
+
+```{r MES1 -> MES2}
+
+#pivot wider to have days 0-10 as variables 
+MES1 %>% 
+  pivot_wider(names_from = day, values_from = pseudocounts) -> MES2
+
+#order columns in ascending order of day
+MES2 <- MES2[c(1, 2, 3, 4, 5, 6, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7)]
+
+#rename day variables to add the word day  (probably and easier way)
+MES2 %>% 
+  rename(day_0 = '0',
+         day_1 = '1',
+         day_2 = '2',
+         day_3 = '3',
+         day_4 = '4',
+         day_5 = '5',
+         day_6 = '6',
+         day_7 = '7',
+         day_8 = '8',
+         day_9 = '9',
+         day_10 = '10') -> MES2
+
+#arrange replicates and experiments in ascending order, grouped by gene_id and suffix
+MES2%>% 
+  group_by(gene_id, suffix) %>% 
+  arrange(exp, rep, .by_group = T) -> MES2
+
+#mutate new total sum column of the total psuedocounts for each replicate across all days
+MES2 %>% 
+  rowwise() %>%
+  mutate(total = sum(c_across(day_0:day_10), na.rm = T)) -> MES2
+
+```
+
+```{r MES2.csv}
+
+MES2 %>% 
+  write_csv("/Users/danielle.dyer/Documents/DS Practicum/BioLabs Project/CSV/MES2.csv")
+
+```
+
+```{r Find primary key}
+
+MES.5 %>% 
+  count(gene_id, suffix) %>% 
+  arrange(desc(n))
+
+MES1 %>% 
+  count(gene_id, suffix, exp, day, rep) %>% 
+  arrange(desc(n))
+
+MES2 %>% 
+  count(gene_id, suffix, exp, rep) %>% 
+  arrange(desc(n))
+
+```
+
+Looking at top types of RNA
+
+```{r Find most important types}
+#viewing number of each type and the respective pseudocounts arranged by sum
+temp <- MES1|>
+  group_by(type)|>
+  summarise(n = n(),
+            sum = sum(pseudocounts))|>
+  arrange(desc(sum))
+view(temp)
+```
+
+```{r Graph of top 10 most prevalent types with standard deviation bars}
+#Creating a graph based on the average pseudocount for each of the top 10 occurring types, over each of the 11 days
+MES1sum <- MES1|>
+  group_by(day,rep,exp,type)|>
+  summarize(pseudocounts=sum(pseudocounts))|>
+  filter(type == "rRNA" | type=="protein_coding" | type == "misc_RNA" | type == "lincRNA" | type == "retained_intron" | type == "processed_transcript"
+         | type == "nonsense_mediated_decay" | type == "processed_pseudogene" | type == "ribozyme" | type == "TEC")|>
+  group_by(rep,day,exp)|>
+  summarize(across(average=mean(pseudocounts)))|>
+  group_by(type,day)|>
+  summarize(avg=mean(pseudocounts),sd=sd(pseudocounts))
+
+#Reordering the types based on final position on graph
+
+MES1sum$type <- factor(MES1sum$type, levels=c("protein_coding", "rRNA", "misc_RNA","lincRNA", "retained_intron", "nonsense_mediated_decay", "processed_pseudogene","processed_transcript", "ribozyme", "TEC"))
+
+#plotting the data
+ggplot(MES1sum,mapping=aes(x=day,y=log(avg), color=type))+
+  geom_line()+
+  geom_point()+
+  geom_errorbar(aes(x=day,y=log(avg),ymin=log(avg-sd), ymax=log(avg+sd),width=.2))+
+  scale_x_continuous(breaks = 0:10)+
+  labs(title="The log Average Pseudocount of Transcript Type Over 11 Days",
+       subtitle = "The log average of the top 10 most prevalent RNA types based on pseudocount sum, over the 11 days",
+       x="Day",y="log(avg)", col="RNA Type")
+
+# ggsave("/Users/danielle.dyer/Desktop/avg_days.png", dpi = 600)
+```
+
+```{r another plot of same graph only with standard error bars}
+
+# Creating the plotting tibble
+
+## Finding ten most "abundant" transcript types
+MES1 |>
+  group_by(type) |>
+  summarize(total = sum(pseudocounts)) |>
+  arrange(desc(total)) |>
+  slice(1:10) |>
+  pull(type) ->
+  top_ten
+
+## Day 11 ranking
+MES1 |>
+  filter(day == 10) |>
+  group_by(type) |>
+  summarize(total = sum(pseudocounts)) |>
+  arrange(desc(total)) |>
+  slice(1:10) |>
+  pull(type) ->
+  top_ten
+  
+
+## Filtering by top ten, summarizing and plotting
+MES1 |>
+  filter(type %in% top_ten) |>
+  group_by(type, exp, rep, day) |>
+  summarize(total = sum(pseudocounts)) |>
+  mutate(type = factor(type)) |>
+  ggplot(mapping = aes(x = day, y = total, color = type)) +
+  stat_summary(geom = "line", fun = mean) +
+  stat_summary(fun.data = mean_se) +
+  scale_x_continuous(breaks = 0:10) +
+  scale_color_brewer(palette = "Set3", name = "RNA Type") +
+  labs(title="The log Average Pseudocount of Transcript Type Over 11 Days",
+       subtitle = "The top 10 most prevalent RNA types based on pseudocount sum",
+       x = "Day", y = "Pseudocount") +
+  coord_trans(y = "log10") +
+  theme_minimal()
+
+```
+
+Should the data be normalized
+
+```{r normalizing MES.5}
+library(dplyr)
+
+#create function
+normalize <- function(x){
+  x/sum(x, na.rm = T)
+}
+
+MES.5|>
+  mutate(across(5:48, .fns = normalize)) ->
+  MES.5_norm
+
+
+#testing 
+summary(colSums(MES.5[5:48]))
+
+sd(colSums(MES2[7:17], na.rm = T))
+
+
+
+```
+
+```{r MES.5_norm.csv}
+
+MES.5_norm %>% 
+  write_csv("/Users/danielle.dyer/Documents/DS Practicum/BioLabs Project/CSV/MES.5_norm.csv")
+
+```
+
+```{r Normalize MES1}
+MES.5_norm %>% 
+  pivot_longer(cols = c(5:48), names_to = "case_id", values_to = "pseudocounts") -> MES1_norm
+
+#Remove KK_MES_ from the front and -2 from the end of the string 
+#Separated case_id into 3 columns (experiment, day and rep)
+MES1_norm %>% 
+  mutate(case_id = str_sub(case_id, start = 8, end = -3)) %>% 
+  separate(case_id, c("exp", "day", "rep"), 
+           sep = "_", 
+           remove = T, 
+           convert = T,
+           fill = "left") -> MES1_norm
+
+#Replace NAs with Exp1, remove the exp and remove the D infront of day number
+MES1_norm <-
+  replace_na(MES1_norm, list(exp = "Exp1"))
+MES1_norm <- 
+  mutate(MES1_norm, exp = str_sub(exp, start = 4)) 
+MES1_norm <- 
+  mutate(MES1_norm, day = str_sub(day, start = 2))
+
+#Change exp and day from characters to numeric 
+MES1_norm <- 
+  mutate(MES1_norm, across(.cols = 5:6, .fns = as.numeric))
+
+
+```
+
+```{r MES1_norm.csv}
+
+MES1_norm %>% 
+  write_csv("/Users/danielle.dyer/Documents/DS Practicum/BioLabs Project/CSV/MES1_norm.csv")
+
+```
+
+Try the previous graphs with the normalized data
+
+```{r Create same graph with MES1_norm}
+# Creating the plotting tibble
+
+## Finding ten most "abundant" transcript types
+MES1_norm |>
+  group_by(type) |>
+  summarize(total = sum(pseudocounts)) |>
+  arrange(desc(total)) |>
+  slice(1:10) |>
+  pull(type) ->
+  top_ten
+
+## Day 11 ranking
+MES1_norm |>
+  filter(day == 10) |>
+  group_by(type) |>
+  summarize(total = sum(pseudocounts)) |>
+  arrange(desc(total)) |>
+  slice(1:10) |>
+  pull(type) ->
+  top_ten
+  
+
+## Filtering by top ten, summarizing and plotting
+MES1_norm |>
+  filter(type %in% top_ten) |>
+  group_by(type, exp, rep, day) |>
+  summarize(total = sum(pseudocounts)) |>
+  mutate(type = factor(type)) |>
+  ggplot(mapping = aes(x = day, y = total, color = type)) +
+  stat_summary(geom = "line", fun = mean) +
+  stat_summary(fun.data = mean_se) +
+  scale_x_continuous(breaks = 0:10) +
+  scale_color_brewer(palette = "Set3", name = "RNA Type") +
+  labs(x = "Day", y = "Pseudocount") +
+  coord_trans(y = "log10") +
+  theme_minimal()+
+  theme_dark()+
+  theme(panel.grid.major = element_line(color = "white"),
+        panel.grid.minor = element_line(color = "white"))
+```
+
+Back to normalizing the last data set created
+
+```{r Normalizing MES2}
+
+#pivot wider to have days 0-10 as variables 
+MES1_norm %>% 
+  pivot_wider(names_from = day, values_from = pseudocounts) -> MES2_norm
+
+#order columns in ascending order of day
+MES2_norm <- MES2_norm[c(1, 2, 3, 4, 5, 6, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7)]
+
+#rename day variables to add the word day  (probably and easier way)
+MES2_norm %>% 
+  rename(day_0 = '0',
+         day_1 = '1',
+         day_2 = '2',
+         day_3 = '3',
+         day_4 = '4',
+         day_5 = '5',
+         day_6 = '6',
+         day_7 = '7',
+         day_8 = '8',
+         day_9 = '9',
+         day_10 = '10') -> MES2_norm
+
+#arrange replicates and experiments in ascending order, grouped by gene_id and suffix
+MES2_norm %>% 
+  group_by(gene_id, suffix) %>% 
+  arrange(exp, rep, .by_group = T) -> MES2_norm
+
+#mutate new total sum column of the total psuedocounts for each replicate across all days
+MES2_norm %>% 
+  rowwise() %>%
+  mutate(total = sum(c_across(day_0:day_10), na.rm = T)) -> MES2_norm
+
+```
+
+```{r MES2_norm.csv}
+
+MES2_norm %>% 
+  write_csv("/Users/danielle.dyer/Documents/DS Practicum/BioLabs Project/CSV/MES2_norm.csv")
+
+```
+
+```{r Graph of top 10 transcipts within experiment 1 and replicate 1 by psuedocount across 11 days (un-normalized data)}
+# identify and create list of top 10 transcripts with highest total pseudocounts from experiment 1 replicate 1 
+MES1|>
+  filter(exp == "1", rep == "1")|>
+  group_by(isoform)|>
+  summarize(total = sum(pseudocounts))|>
+  arrange(desc(total)) |>
+  slice(1:10) |>
+  pull(isoform) ->
+  top_ten_transcript
+
+#plot this top 10 subset faciting by each experiment and replicate
+MES1 |>
+  filter(isoform %in% top_ten_transcript) |>
+  ggplot(mapping = aes(x = day, y = pseudocounts, color = isoform)) +
+  geom_point() +
+  geom_line() +
+  facet_grid(rows = vars(exp), cols = vars(rep)) +
+  scale_x_continuous(breaks = 0:10) +
+  scale_color_brewer(palette = "Set3", name = "Isoform") +
+  labs(x = "Day", y = "Pseudocount") +
+  coord_trans(y = "log10") +
+  theme_minimal()
+
+# ggsave("/Users/danielle.dyer/Desktop/top_ten_transcripts.png", dpi = 600)
+
+```
+
+```{r same as previous graph (normalized data)}
+
+MES1_norm|>
+  filter(exp == "1", rep == "1")|>
+  group_by(isoform)|>
+  summarize(total = sum(pseudocounts))|>
+  arrange(desc(total)) |>
+  slice(1:10) |>
+  pull(isoform) ->
+  top_ten_transcript
+
+MES1_norm |>
+  filter(isoform %in% top_ten_transcript) |>
+  ggplot(mapping = aes(x = day, y = pseudocounts, color = isoform)) +
+  geom_point() +
+  geom_line() +
+  facet_grid(rows = vars(exp), cols = vars(rep)) +
+  scale_x_continuous(breaks = 0:10) +
+  scale_color_brewer(palette = "Set3", name = "Isoform") +
+  labs(x = "Day", y = "Pseudocount") +
+  # coord_trans(y = "log10") +
+  theme_minimal()
+
+# ggsave("/Users/danielle.dyer/Desktop/top_ten_transcripts_norm.png", dpi = 600)
+
+```
+
+
+
+Looking at percent changes from day to day within the top_ten_transcript subset of the data
+```{r Percent change from day to day}
+
+#Creating a column at the end of the data table for percent change for top ten transcripts based on pseudocounts
+MES1_pct <- MES1|>
+  filter(isoform%in%top_ten_transcript)|>
+  group_by(isoform, exp, rep)|> #This is so the percent changes are based on previous values within the same transcript, experiment number and repetition number
+  arrange(day)|>
+  mutate(pct_change = ((pseudocounts/lag(pseudocounts))-1)*100)
+
+#Omitting the transcript IDs "Eef1a1_201" and "Col4a1_208" due to strangely high changes in pseudocounts (48,201,735% was highest)
+#comment this code out if wanting to see the these transcripts
+MES1_pct <- MES1_pct|>
+  filter(isoform != "Col4a1-208" & isoform != "Eef1a1-201")
+
+#Graphing the percent change in pseudocount, facet wrapped so that rows are experiment number and columns are repetitions
+MES1_pct|>
+  ggplot(mapping = aes(x=day, y = pct_change, color=isoform))+
+  geom_line()+
+  facet_grid(rows = vars(exp), cols = vars(rep)) +
+  scale_x_continuous(breaks = 0:10) +
+  scale_color_brewer(palette = "Set3", name = "Isoform") +
+  labs(x = "Day", y = "Percent Change") +
+  theme_minimal()
+```
+
+
+Model of top 10 isoforms with the greatest absolute difference (original data)
+```{r create mes_filter of top 10 highest absolute differences between the first and second half of the days}
+MES1|>
+  mutate(group = ifelse(day < 5, "first", "second")) |>
+  group_by(isoform, group)|>
+  summarize(avg = mean(pseudocounts)) -> mes_diff
+
+mes_diff|>
+  pivot_wider(names_from = group, values_from = avg)|>
+  mutate(diff = second - first) -> mes_diff
+
+mes_diff |>
+  group_by(isoform)|>
+  summarize(diff = diff)|>
+  arrange(desc(abs(diff))) |>
+  slice(1:10) -> diff_filter
+
+mes_diff |>
+  group_by(isoform)|>
+  summarize(diff = diff)|>
+  arrange(desc(abs(diff))) |>
+  slice(1:10) |>
+  pull(isoform) -> top10_diff
+
+
+
+```
+
+```{r model/graph diff_filter}
+MES1|>
+  semi_join(diff_filter) -> diff_filter1 
+
+MES1|>
+  semi_join(diff_filter) |>
+  filter(isoform != "Col4a1-208") -> 
+  diff_filter2 
+# isoform != "Col4a1-201",
+
+#model for filter 1 with colagen RNA
+mod_1 <- lm(log(pseudocounts) ~ day * isoform, data = diff_filter1)
+# summary(mod_1)
+
+# plot(mod_1)
+
+diff_filter1 |>
+  ggplot(aes(x = day, y = log(pseudocounts), color = isoform)) +
+  geom_point(aes(shape = factor(exp)), position = "jitter") +
+  geom_smooth(method = "lm", se = F) +
+  scale_color_brewer(palette = "Set3")
+
+
+#model for filter 2 without colagen RNA
+mod_2 <- lm(log(pseudocounts) ~ day * isoform, data = diff_filter2)
+# summary(mod_1)
+
+# plot(mod_2)
+
+diff_filter2 |>
+  ggplot(aes(x = day, y = log(pseudocounts), color = isoform)) +
+  geom_point(aes(shape = factor(exp)), position = "jitter") +
+  geom_smooth(method = "lm", se = F) +
+  scale_color_brewer(palette = "Set3")
+
+```
+
+```{r self fitted models}
+
+#own model plotted step by step
+# fitted.values(mod_2)
+mod_2_plot_df <- diff_filter2
+mod_2_plot_df$preds <- fitted.values(mod_2)
+mod_2_plot_df$pseudocounts <- log(mod_2_plot_df$pseudocounts)
+
+mod_2_ci <- as_tibble(predict(object = mod_2,
+                              interval = "confidence")[, 2:3])
+
+mod_2_plot_df |>
+  add_column(mod_2_ci) ->
+  mod_2_plot_df
+
+mod_2_plot_df$isoform <- factor(mod_2_plot_df$isoform, levels=c("unit-45s-5ets", "unit-45s-its2", "Col4a1-201", "Gm26917-202", "unit-45s-its1", "Col4a2-201", "Lama1-201", "Lamc1-201", "Rpph1-201"))
+
+mod_2_plot_df |>
+  ggplot(aes(x = day, y = pseudocounts)) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr, fill = isoform), show.legend = F, alpha = 0.2) +
+  # geom_point(aes(color = isoform)) +
+  geom_line(aes(y = preds, color = isoform))+
+  scale_x_continuous(breaks = 0:10) +
+  labs(title="Linear models of the top 9 transcripts with the highest absolute difference",
+       x = "Day", y = "Pseudocount", col = "Isoform")
+  
+  
+
+
+#own fitted model with all 10 from mod 1
+# fitted.values(mod_1)
+mod_1_plot_df <- diff_filter1
+mod_1_plot_df$preds <- fitted.values(mod_1)
+mod_1_plot_df$pseudocounts <- log(mod_1_plot_df$pseudocounts)
+
+mod_1_ci <- as_tibble(predict(object = mod_1,
+                              interval = "confidence")[, 2:3])
+
+mod_1_plot_df |>
+  add_column(mod_1_ci) ->
+  mod_1_plot_df
+
+mod_1_plot_df$isoform <- factor(mod_1_plot_df$isoform, levels=c("unit-45s-5ets", "unit-45s-its2", "Col4a1-201", "Gm26917-202", "unit-45s-its1", "Col4a2-201", "Lama1-201", "Lamc1-201", "Rpph1-201", "Col4a1-208"))
+
+mod_1_plot_df |>
+  ggplot(aes(x = day, y = pseudocounts)) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr, fill = isoform), show.legend = F, alpha = 0.3) +
+  geom_point(aes(color = isoform), position = "jitter") +
+  geom_line(aes(y = preds, color = isoform))+
+  scale_x_continuous(breaks = 0:10) +
+  labs(title="Linear models of the top 10 transcripts with the highest absolute difference",
+       x = "Day", y = "Pseudocount", col = "Isoform")
+  
+  
+
+
+```
+
+```{r pairwise comparison of trends}
+# library(emmeans)
+
+emtrends(object = mod_2,
+         specs = pairwise ~ isoform,
+         var = "day")
+```
+
+```{r making readable table from results}
+library(gt)
+
+#Absolute difference table using mod 2 (diff_filter2)
+try2 <- emtrends(object = mod_2,
+                 specs = pairwise ~ isoform,
+                 var = "day")
+contrast2 <- as.data.frame(try2$contrasts)
+
+contrast2|>
+  mutate(group = str_split(contrast, pattern = " - "),
+         group = map(group, ~ .x[[1]][1]),
+         group = str_sub(group, start = 2, end = -2))|>
+  arrange(desc(estimate))|>
+  gt(groupname_col = "group")|>
+  fmt_number(columns = c("estimate", "SE", "t.ratio", "p.value"),
+             decimals = 3)|>
+  tab_options(column_labels.background.color = "#9999FF")|>
+  tab_options(row_group.background.color = "#99CCFF")|>
+  tab_options(row_group.font.weight = "bold")|>
+  tab_header(
+    title = "Absolute Difference"
+  )|>
+  tab_options(
+    heading.title.font.size = "30px",
+    heading.title.font.weight = "bold")|>
+  data_color(
+    columns = estimate,
+    colors = "YlGnBu")|>
+  tab_style(
+    style = cell_fill(color = "red"),
+    locations = cells_body(
+      columns = p.value,
+      rows = p.value >= 0.05)
+  )|>
+  tab_style(
+    style = cell_fill(color = "green"),
+    locations = cells_body(
+      columns = p.value,
+      rows = p.value <= 0.05))
+
+```
+
+Model of top ten isoforms with the highest total pseudocounts
+```{r find top 10 transcripts with highest pseudocounts}
+
+MES1|>
+  group_by(isoform)|>
+  summarize(total = sum(pseudocounts))|>
+  arrange(desc(total)) |>
+  slice(1:10) |>
+  pull(isoform) ->
+  top10_isoform
+
+MES1|>
+  group_by(isoform)|>
+  summarize(total = sum(pseudocounts))|>
+  arrange(desc(total)) |>
+  slice(1:10) -> sum_filter
+
+
+```
+
+```{r model/graph sum_filter}
+MES1|>
+  semi_join(sum_filter) -> sum_filter1 
+
+#no log transformation
+mod_3.5 <- lm(pseudocounts ~ day * isoform, data = sum_filter1)
+# summary(mod_3.5)
+# plot(mod_3.5)
+
+mod_3 <- lm(log(pseudocounts) ~ day * isoform, data = sum_filter1)
+# summary(mod_3)
+# plot(mod_3)
+
+#linear model plot from ggplot
+sum_filter1 |>
+  ggplot(aes(x = day, y = log(pseudocounts), color = isoform)) +
+  geom_point(aes(shape = factor(exp)), position = "jitter") +
+  geom_smooth(method = "lm", se = F) +
+  scale_color_brewer(palette = "Set3")
+
+```
+
+```{r self fitted models}
+#own model plotted step by step
+# fitted.values(mod_3)
+mod_3_plot_df <- sum_filter1
+mod_3_plot_df$preds <- fitted.values(mod_3)
+mod_3_plot_df$pseudocounts <- log(mod_3_plot_df$pseudocounts)
+
+
+mod_3_ci <- as_tibble(predict(object = mod_3,
+                              interval = "confidence")[, 2:3])
+
+mod_3_plot_df |>
+  add_column(mod_3_ci) ->
+  mod_3_plot_df
+
+mod_3_plot_df$isoform <- factor(mod_3_plot_df$isoform, levels=c("unit-45s-5ets", "unit-45s-its2", "Rn7s1-201", "Gm26917-202", "unit-45s-its1", "Rn28S", "Rn7sk-201", "Gm42418-201", "Eef1a1-201", "Rpph1-201"))
+
+mod_3_plot_df |>
+  ggplot(aes(x = day, y = pseudocounts)) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr, fill = isoform), show.legend = F, alpha = 0.5) +
+  # geom_point(aes(color = isoform)) +
+  geom_line(aes(y = preds, color = isoform))+
+  scale_x_continuous(breaks = 0:10) +
+  labs(title="Linear models of the top 10 most abundent transcripts",
+       x = "Day", y = "Pseudocount", col = "Isoform")
+  
+```
+
+```{r pairwise comparison of trends}
+# library(emmeans)
+
+emtrends3 <- emtrends(object = mod_3,
+         specs = pairwise ~ isoform,
+         var = "day")
+```
+
+```{r making readable table from results}
+#Difference between slopes table using mod 3 (sum_filter1)
+try3 <- emtrends(object = mod_3,
+                  specs = pairwise ~ isoform,
+                  var = "day")
+contrast3 <- as.data.frame(try3$contrasts)
+slopes <- as.data.frame(try3$emtrends)
+
+contrast3|>
+  mutate(group = str_split(contrast, pattern = " - "),
+         group = map(group, ~ .x[[1]][1]),
+         group = str_sub(group, start = 2, end = -2))|>
+  arrange(desc(estimate))|>
+  gt(groupname_col = "group")|>
+  fmt_number(columns = c("estimate", "SE", "t.ratio", "p.value"),
+             decimals = 3)|>
+  tab_options(column_labels.background.color = "#9999FF")|>
+  tab_options(row_group.background.color = "#99CCFF")|>
+  tab_options(row_group.font.weight = "bold")|>
+  tab_header(
+    title = "Highest Pseudocounts",
+    subtitle = "Estimates of how different the slopes of the transcripts are from each other"
+  )|>
+  tab_options(
+    heading.title.font.size = "30px",
+    heading.title.font.weight = "bold")|>
+  data_color(
+    columns = estimate,
+    colors = "YlGnBu")|>
+  tab_style(
+    style = cell_fill(color = "red"),
+    locations = cells_body(
+      columns = p.value,
+      rows = p.value >= 0.05)
+  )|>
+  tab_style(
+    style = cell_fill(color = "green"),
+    locations = cells_body(
+      columns = p.value,
+      rows = p.value <= 0.05))
+
+```
+
+
+Filter for a top 10: by maximum difference between sums between days (combining all reps), take the top 10 max differences
+```{r find top 10 isoforms with highest daily difference counts}
+MES1_norm %>%
+  select(isoform, type, exp, day, pseudocounts) %>%
+  group_by(day, isoform) %>%
+  mutate(sum = sum(pseudocounts), .keep = "unused") %>%
+  distinct() -> daily_diff
+
+daily_diff %>%
+  group_by(isoform, exp) %>%
+  mutate(abs_daily_diff = abs(lead(sum) - sum)) -> daily_diff
+
+daily_diff |>
+  group_by(isoform)|>
+  filter(abs_daily_diff != "NA") |>
+  summarize(total = sum(abs_daily_diff))|>
+  arrange(desc(total)) |>
+  slice(1:10) -> spike_filter
+
+daily_diff |>
+  group_by(isoform)|>
+  filter(abs_daily_diff != "NA") |>
+  summarize(total = sum(abs_daily_diff))|>
+  arrange(desc(total)) |>
+  slice(1:10)|>
+  pull(isoform) -> top10_spike
+```
+
+```{r model/graph spike_filter}
+MES1_norm|>
+  semi_join(spike_filter) -> spike_filter1
+
+MES1_norm|>
+  semi_join(spike_filter) |>
+  filter(isoform != "Col4a1-201") -> 
+  spike_filter2 
+
+MES1_norm|>
+  semi_join(spike_filter) |>
+  filter(isoform != "Col4a1-201", isoform != "Col4a2-201") -> 
+  spike_filter3
+
+#model for filter 1 with colagen RNA
+mod_4 <- lm(log(pseudocounts) ~ day * isoform, data = spike_filter1)
+summary(mod_4)
+
+plot(mod_4)
+
+spike_filter1 |>
+  ggplot(aes(x = day, y = log(pseudocounts), color = isoform)) +
+  geom_point(aes(shape = factor(exp)), position = "jitter") +
+  geom_smooth(method = "lm", se = F) +
+  scale_color_brewer(palette = "Set3")
+
+
+#model for filter 2 without 1 colagen RNA
+mod_5 <- lm(log(pseudocounts) ~ day * isoform, data = spike_filter2)
+summary(mod_5)
+
+plot(mod_5)
+
+spike_filter2 |>
+  ggplot(aes(x = day, y = log(pseudocounts), color = isoform)) +
+  geom_point(aes(shape = factor(exp)), position = "jitter") +
+  geom_smooth(method = "lm", se = F) +
+  scale_color_brewer(palette = "Set3")
+
+
+#model for filter 3 with both colagen RNA
+mod_6 <- lm(log(pseudocounts) ~ day * isoform, data = spike_filter3)
+summary(mod_6)
+
+plot(mod_6)
+
+spike_filter3 |>
+  ggplot(aes(x = day, y = log(pseudocounts), color = isoform)) +
+  geom_point(aes(shape = factor(exp)), position = "jitter") +
+  geom_smooth(method = "lm", se = F) +
+  scale_color_brewer(palette = "Set3")
+
+
+```
+
+
+Look for differences between experiments and replicates 
+```{r graphs for difference just between experiment}
+
+#reminder: sum_filter1 = top 10 transcripts with highest pseudocounts in MES1 format
+#graph comparing experiments with mean and standard error bars
+sum_filter1 |>
+  ggplot(aes(x = factor(exp), y = log(pseudocounts), color = factor(exp))) +
+  # geom_point(color = "lightgray")+
+  stat_summary(show.legend = F)+
+  labs(title = "Difference between experiments", x = "Experiment")
+
+#graph comparing experiments with mean and all summary points
+sum_filter1 |>
+  ggplot(aes(x = factor(exp), y = log(pseudocounts), color = factor(exp))) +
+  geom_point(color = "lightgray")+
+  stat_summary(show.legend = F)+
+  labs(title = "Difference between experiments", x = "Experiment",)
+
+
+##note that these graphs are on different scales!
+
+```
+Using sum_filter1 subset to try different models 
+```{r model with isoform and experiment interaction }
+#model
+mod_7 <- lm(log(pseudocounts) ~ factor(exp) * isoform, data = sum_filter1)
+summary(mod_7)
+
+##graph
+sum_filter1 |>
+  ggplot(aes(x = isoform, y = log(pseudocounts), color = factor(exp))) +
+  # geom_point(color = "lightgray")+
+  stat_summary()
+
+emmean7 <- emmeans(mod_7, specs = "exp", by = "isoform")
+
+pairs(emmean7)
+
+```
+
+```{r model with isoform and replicate interaction }
+#model (all replicates combined not separated by experiment)
+mod_8 <- lm(log(pseudocounts) ~ factor(rep) * isoform, data = sum_filter1)
+summary(mod_8)
+
+#graph
+sum_filter1 |>
+  ggplot(aes(x = isoform, y = log(pseudocounts), color = factor(exp))) +
+  geom_point(color = "lightgray")+
+  stat_summary()+
+  coord_flip()+
+  labs(title = "Differences between experiments of the top 10 most abundant transcripts",
+       x = "Isoform", y = "log(Pseudocount)", col = "Experiment")
+
+# ggsave("/Users/danielle.dyer/Desktop/expdiff600.png", dpi = 600)
+
+emmean8 <- emmeans(mod_8, specs = "rep", by = "isoform")
+
+pairs(emmean8)
+
+
+```
+
+
+Looking at the difference between replicates
+```{r model only including data from experiment 1}
+#mod_9 isoform and replicate interaction with experiment 1 data
+sum_filter1_exp1 <- sum_filter1|>
+  filter(exp == "1")
+
+mod_9 <- lm(log(pseudocounts) ~ factor(rep) * isoform, data = sum_filter1_exp1)
+summary(mod_9)
+
+emmean9 <- emmeans(mod_9, specs = "rep", by = "isoform")
+
+pairs(emmean9)
+```
+
+```{r models only including data from experiment 2}
+#mod_10 isoform and replicate interaction with experiment 2 data
+sum_filter1_exp2 <- sum_filter1|>
+  filter(exp == "2")
+
+mod_10 <- lm(log(pseudocounts) ~ factor(rep) * isoform, data = sum_filter1_exp2)
+summary(mod_10)
+
+emmean10 <- emmeans(mod_10, specs = "rep", by = "isoform")
+
+pairs(emmean10)
+```
+
+```{r graph difference between replicates facited by experiment}
+sum_filter1 |>
+  ggplot(aes(x = isoform, y = log(pseudocounts), color = factor(rep))) +
+  geom_point(color = "lightgray")+
+  stat_summary()+
+  facet_wrap(vars(exp))+
+  coord_flip()+
+  labs(title = "Differences between replicates of the top 10 most abundant transcripts",
+       x = "Isoform", y = "log(Pseudocount)", col = "Replicate")
+
+```
+
+
+
+Making animation to showing pseudocount change over days for presentation
+```{r making an animation of change in psuedocounts of top 31 transcripts over the 11 days}
+library(tidyverse)
+library(gganimate)
+# install.packages(gifski)
+library(gifski)
+
+MES1|>
+  group_by(isoform) |>
+  summarize(mean = mean(pseudocounts, na.rm = T)) |>
+  filter(mean > 1000) ->
+  ind_filter
+
+MES1|>
+  semi_join(y = ind_filter) ->
+  mes_ind_filter
+
+animation <- mes_ind_filter |>
+  ggplot() +
+  geom_tile(aes(x = rep, y = isoform, fill = log(pseudocounts))) +
+  facet_wrap(~ exp) +
+  scale_x_continuous(breaks = 1:2) +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
+  transition_time(time = day) +
+  labs(title = "Day {frame_time}", y = NULL)
+
+animation <- animate(animation, renderer = gifski_renderer())
+
+animation
+```
